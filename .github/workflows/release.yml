@@ -41,32 +41,50 @@ jobs:
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      # Missing Apple secrets do not fail the build — tauri-action just skips
-      # signing and emits an unsigned .dmg. That is the desired behaviour for
-      # now, but it is also a trap: a release can look successful and ship
-      # unsigned. Say which mode we are in, loudly, in the log.
-      - name: Report signing mode
+      # Tauri's bundler decides to code-sign based on whether APPLE_CERTIFICATE
+      # is *defined*, not whether it is non-empty. Listing it under `env:` with
+      # an unset secret therefore defines it as "" and sends the build down the
+      # signing path, where `security import` fails on the empty certificate.
+      #
+      # So the variables must not exist at all unless there is a real value.
+      # Exporting them through GITHUB_ENV only when the secret is present is
+      # what achieves that — an `env:` block cannot omit a key conditionally.
+      - name: Enable Apple signing
+        id: signing
+        if: matrix.platform == 'macos-latest'
         shell: bash
-        run: |
-          if [ "${{ matrix.platform }}" != "macos-latest" ]; then
-            echo "::notice title=Windows::Windows builds are unsigned (no free publicly-trusted certificate). SmartScreen will warn."
-          elif [ -n "${{ secrets.APPLE_CERTIFICATE }}" ]; then
-            echo "::notice title=macOS::Apple secrets present — the .dmg will be signed and notarized."
-          else
-            echo "::warning title=macOS unsigned::APPLE_CERTIFICATE is not set, so this .dmg will be UNSIGNED and un-notarized. Gatekeeper will block it on other machines. Set the six APPLE_* secrets to sign."
-          fi
-
-      - uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Unset secrets are empty strings, which tauri-action treats as
-          # "don't sign" rather than an error — see the notice step above.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning title=macOS unsigned::APPLE_CERTIFICATE is not set, so this .dmg will be UNSIGNED and un-notarized. Gatekeeper will block it on other machines. Set the six APPLE_* secrets to produce a signed build."
+            exit 0
+          fi
+          echo "::notice title=macOS::Apple secrets present — the .dmg will be signed and notarized."
+          {
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+            echo "APPLE_ID=$APPLE_ID"
+            echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Note Windows signing
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: echo "::notice title=Windows::Windows builds are unsigned (no free publicly-trusted certificate). SmartScreen will warn on first run."
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No APPLE_* keys here on purpose — see "Enable Apple signing" above.
+          # They arrive via GITHUB_ENV, and only when a certificate exists.
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Lumastra Discord RPC ${{ github.ref_name }}'
