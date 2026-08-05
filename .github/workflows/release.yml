@@ -5,7 +5,38 @@ on:
     tags: ['v*']
 
 jobs:
+  # Create the draft release ONCE, before the matrix fans out.
+  #
+  # Without this, each matrix job calls tauri-action independently and each
+  # creates its own draft — GitHub allows duplicate drafts for one tag, because
+  # a draft is not bound to its tag until published. The result is two releases
+  # with the same tag, one holding the macOS artifacts and one the Windows ones,
+  # and whichever you publish is missing half the downloads.
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - uses: actions/github-script@v7
+        id: create
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '')
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Lumastra Discord RPC ${tag}`,
+              draft: true,
+              generate_release_notes: true,
+            })
+            core.setOutput('release_id', data.id)
+            core.notice(`Created draft release ${data.id} for ${tag}`)
+
   build:
+    needs: create-release
     permissions:
       contents: write
     strategy:
@@ -86,9 +117,9 @@ jobs:
           # No APPLE_* keys here on purpose — see "Enable Apple signing" above.
           # They arrive via GITHUB_ENV, and only when a certificate exists.
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Lumastra Discord RPC ${{ github.ref_name }}'
-          releaseDraft: true
+          # Upload into the release create-release already made, rather than
+          # creating one per matrix job.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
 
       # tauri-action only publishes the *bundles* (NSIS + MSI). The raw
