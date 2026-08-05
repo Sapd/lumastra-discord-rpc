@@ -1,0 +1,22 @@
+# Rust / Tauri build output
+/src-tauri/target/
+/src-tauri/gen/
+
+# Node
+node_modules/
+dist/
+
+# Scratch directory used by the SDD workflow (not part of the shipped repo)
+.superpowers/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
+# Internal design + planning docs (not part of the shipped repo)
+docs/superpowers/

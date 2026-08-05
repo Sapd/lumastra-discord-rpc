@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="style.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lumastra Discord RPC</title>
+  </head>
+
+  <body>
+    <main class="container">
+      <h1>Lumastra Discord RPC</h1>
+
+      <section class="field">
+        <label for="server_url">Server URL</label>
+        <input
+          id="server_url"
+          type="url"
+          placeholder="https://media.example.com"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <span id="server_url_error" class="field-error"></span>
+      </section>
+
+      <section class="auth-row">
+        <span id="auth" class="auth-status">Not signed in</span>
+        <div class="auth-buttons">
+          <button id="signin" type="button">Sign in</button>
+          <button id="signout" type="button" class="secondary">Sign out</button>
+        </div>
+      </section>
+
+      <section class="field">
+        <span class="field-label">Show presence for</span>
+        <label class="checkbox">
+          <input id="enable_movies" type="checkbox" />
+          Movies
+        </label>
+        <label class="checkbox">
+          <input id="enable_series" type="checkbox" />
+          Series
+        </label>
+        <label class="checkbox">
+          <input id="enable_music" type="checkbox" />
+          Music
+        </label>
+        <label class="checkbox">
+          <input id="enable_audiobooks" type="checkbox" />
+          Audiobooks
+        </label>
+        <label class="checkbox">
+          <input id="enable_livetv" type="checkbox" />
+          Live TV
+        </label>
+      </section>
+    </main>
+
+    <script type="module" src="settings.js"></script>
+  </body>
+</html>
