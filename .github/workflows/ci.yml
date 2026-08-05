@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets a maintainer re-run the checks without pushing.
+  workflow_dispatch:
+
+# A new push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      # Don't let one platform's failure hide the other's result — the whole
+      # point of the matrix is knowing whether a break is platform-specific.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+
+      # Test counts differ per platform by design: some tests are cfg-gated to
+      # assert platform-specific behaviour (file permissions, config-directory
+      # resolution), so each OS runs its own set.
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # --all-targets is required: without it clippy does not lint test code.
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # Catches breakage that only appears in a release profile — notably a
+      # cfg-gated backend that compiles in debug but not in release.
+      - name: Release build
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release
