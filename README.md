@@ -28,8 +28,11 @@ broadcasting immediately without signing out.
 
 ## Install
 
-Download the latest `.dmg` (macOS) or `.msi` (Windows) from
-[Releases](https://github.com/Sapd/lumastra-discord-rpc/releases).
+Download from [Releases](https://github.com/Sapd/lumastra-discord-rpc/releases):
+
+- **macOS** — `.dmg`
+- **Windows** — `.msi` or `-setup.exe` to install, or `-portable-x64.exe` to just run it
+  without installing (it still keeps its settings in `%APPDATA%`).
 
 On Windows you'll get a SmartScreen warning, because the builds aren't code-signed yet —
 click **More info** → **Run anyway**.

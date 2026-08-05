@@ -90,3 +90,25 @@ jobs:
           releaseName: 'Lumastra Discord RPC ${{ github.ref_name }}'
           releaseDraft: true
           args: ${{ matrix.args }}
+
+      # tauri-action only publishes the *bundles* (NSIS + MSI). The raw
+      # executable built alongside them runs standalone — Tauri embeds the
+      # frontend and WebView2 ships with Windows — so publish it for people who
+      # would rather not run an installer.
+      #
+      # "Portable" here means no installer, NOT no footprint: it still keeps
+      # config and tokens in %APPDATA%, exactly like the installed build.
+      - name: Publish portable Windows executable
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          src="src-tauri/target/release/lumastra-discord-rpc.exe"
+          if [ ! -f "$src" ]; then
+            echo "::error title=Portable exe missing::Expected $src — the bundle step may have changed its output layout."
+            exit 1
+          fi
+          out="Lumastra-Discord-RPC-${GITHUB_REF_NAME}-portable-x64.exe"
+          cp "$src" "$out"
+          gh release upload "$GITHUB_REF_NAME" "$out" --clobber --repo "$GITHUB_REPOSITORY"
