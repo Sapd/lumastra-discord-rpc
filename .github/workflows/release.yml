@@ -41,10 +41,26 @@ jobs:
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      # Missing Apple secrets do not fail the build — tauri-action just skips
+      # signing and emits an unsigned .dmg. That is the desired behaviour for
+      # now, but it is also a trap: a release can look successful and ship
+      # unsigned. Say which mode we are in, loudly, in the log.
+      - name: Report signing mode
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" != "macos-latest" ]; then
+            echo "::notice title=Windows::Windows builds are unsigned (no free publicly-trusted certificate). SmartScreen will warn."
+          elif [ -n "${{ secrets.APPLE_CERTIFICATE }}" ]; then
+            echo "::notice title=macOS::Apple secrets present — the .dmg will be signed and notarized."
+          else
+            echo "::warning title=macOS unsigned::APPLE_CERTIFICATE is not set, so this .dmg will be UNSIGNED and un-notarized. Gatekeeper will block it on other machines. Set the six APPLE_* secrets to sign."
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing + notarization. Windows is unsigned for v1 — see README.
+          # Unset secrets are empty strings, which tauri-action treats as
+          # "don't sign" rather than an error — see the notice step above.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
