@@ -36,12 +36,19 @@ OS), so each platform runs its own.
 ## Token storage
 
 Release builds store OAuth tokens in the OS keychain (macOS Keychain, Windows Credential
-Manager).
+Manager). **On macOS this only persists across launches if the app is signed with a stable
+identity.** The Keychain ACL is bound to the code signature, and an ad-hoc (unsigned)
+signature is derived from the binary's own hash — so an unsigned or ad-hoc-signed release
+build can write a token, report success, and still be unable to read it back on the next
+launch, or on the next run at all. That is why debug builds use a file store instead (see
+below), and it applies just as much to release builds until
+[signing is actually configured](#releases-and-signing) — an unsigned release quietly loses
+the login on every restart.
 
-Debug builds deliberately do **not**. They use a `0600` file in the app config directory
-instead, because development binaries are ad-hoc signed — their code signature changes on
-every rebuild, so macOS can't maintain a stable keychain ACL and re-prompts on every
-launch. Release builds are properly signed and use the keychain as intended.
+Debug builds deliberately do **not** use the keychain. They use a `0600` file in the app
+config directory instead, because development binaries are ad-hoc signed — their code
+signature changes on every rebuild, so macOS can't maintain a stable keychain ACL and
+re-prompts on every launch.
 
 ## Discord Rich Presence art asset
 

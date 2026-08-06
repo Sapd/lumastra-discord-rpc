@@ -65,6 +65,21 @@ pub struct TokenResponse {
     pub expires_in: Option<u64>,
 }
 
+/// Whether a `store()` that reported success actually round-trips: compares
+/// what was stored against what an immediate `load()` returns.
+///
+/// A store/load pair that disagree is exactly the ad-hoc-signature case
+/// described below: macOS binds a Keychain ACL to the code signature, and an
+/// ad-hoc signature is derived from the binary's own hash, so a `store()`
+/// that reports success can still be unreadable (or resolve to a stale
+/// value) on the very next `load()`. Kept as a pure comparison, separate
+/// from the read-back call itself, so it's testable without touching the
+/// real keychain — this crate deliberately has no keychain tests (the
+/// "Always Allow" prompt they'd risk triggering can hang).
+pub fn verify_round_trip(stored: &TokenResponse, loaded: Option<&TokenResponse>) -> bool {
+    loaded == Some(stored)
+}
+
 #[cfg(not(debug_assertions))]
 fn entry() -> Result<keyring::Entry, AuthError> {
     Ok(keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER)?)
@@ -487,5 +502,45 @@ pub async fn refresh(
         200 => Ok(response.json().await?),
         400 | 401 => Err(AuthError::RefreshRejected),
         other => Err(AuthError::Status(other)),
+    }
+}
+
+#[cfg(test)]
+mod verify_round_trip_tests {
+    use super::*;
+
+    fn sample() -> TokenResponse {
+        TokenResponse {
+            access_token: "access-123".into(),
+            refresh_token: Some("refresh-456".into()),
+            expires_in: Some(3600),
+        }
+    }
+
+    #[test]
+    fn true_when_the_read_back_matches_what_was_stored() {
+        let stored = sample();
+        let loaded = sample();
+        assert!(verify_round_trip(&stored, Some(&loaded)));
+    }
+
+    #[test]
+    fn false_when_nothing_reads_back() {
+        // The unsigned-build failure mode: `store()` reports `Ok`, but the
+        // entry it wrote isn't readable under this process's signature.
+        let stored = sample();
+        assert!(!verify_round_trip(&stored, None));
+    }
+
+    #[test]
+    fn false_when_the_read_back_is_a_stale_value() {
+        // Not just "nothing there" — a signature mismatch can also resolve
+        // to a leftover entry from a previous install/signature.
+        let stored = sample();
+        let stale = TokenResponse {
+            access_token: "old-access".into(),
+            ..sample()
+        };
+        assert!(!verify_round_trip(&stored, Some(&stale)));
     }
 }

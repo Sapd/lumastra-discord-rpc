@@ -204,8 +204,26 @@ async fn tick(
 
             match tokens::refresh(http, &base_url, refresh_token).await {
                 Ok(fresh) => {
-                    let _ = tokens::store_async(fresh.clone()).await;
+                    let persisted = tokens::store_async(fresh.clone()).await.is_ok();
                     *cached_tokens = Some(fresh);
+
+                    if !persisted {
+                        // The refresh itself succeeded, so this session is
+                        // still valid — keep using the fresh tokens from
+                        // memory rather than treating this as a failed poll
+                        // or signing the user out over a local write error.
+                        // But the *next* 401 re-reads the keychain a few
+                        // lines up (deliberately, to notice an external
+                        // sign-out), and a persist that silently failed here
+                        // means that re-read hands back this now-retired
+                        // refresh token instead: the server rotates on every
+                        // refresh and revokes the whole device session when
+                        // a retired token is presented. A discarded `Err`
+                        // used to hide exactly that setup — surface it in
+                        // the tray instead.
+                        set_status(app, "Sign-in not saved — will be needed again after restart");
+                        return Duration::from_secs(1);
+                    }
 
                     // A successful refresh still counts as a failed poll: if
                     // the server keeps returning 401 while refreshing keeps

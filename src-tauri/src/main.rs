@@ -113,6 +113,20 @@ fn logout(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Outcome of a successful `begin_login`, returned to the settings UI.
+///
+/// `persisted` is `false` when the read-back immediately after
+/// `tokens::store` didn't match what was stored — see the call site below.
+/// The sign-in itself still succeeded (the poller has the tokens in memory
+/// for this run), so this never turns into an error; the UI uses it to warn
+/// the user instead.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginResult {
+    user_code: String,
+    persisted: bool,
+}
+
 /// Start the device flow: open the pre-filled verification URL in the user's
 /// browser, then poll until approval.
 ///
@@ -123,7 +137,7 @@ fn logout(app: tauri::AppHandle) -> Result<(), String> {
 /// lifetime with nothing to act on; the old code returned `user_code` only
 /// on success, by which point it was too late to be useful as a fallback.
 #[tauri::command]
-async fn begin_login(app: tauri::AppHandle, server_url: String) -> Result<String, String> {
+async fn begin_login(app: tauri::AppHandle, server_url: String) -> Result<LoginResult, String> {
     use tauri::Emitter;
     use tauri_plugin_opener::OpenerExt;
 
@@ -164,6 +178,14 @@ async fn begin_login(app: tauri::AppHandle, server_url: String) -> Result<String
     .map_err(|e| e.to_string())?;
 
     auth::tokens::store(&tokens).map_err(|e| e.to_string())?;
+    // `store()` reporting success is not proof the tokens will still be
+    // there on the next launch — on macOS the Keychain ACL is bound to the
+    // app's code signature, and an ad-hoc (unsigned) signature is derived
+    // from the binary's own hash, so a write can succeed but not survive a
+    // read-back. Checking immediately, rather than trusting the `Ok`, is
+    // what makes that condition visible instead of a silent "worked while
+    // the app happened to keep running."
+    let persisted = auth::tokens::verify_round_trip(&tokens, auth::tokens::load().as_ref());
     // Symmetric with `logout`: without this, a fresh sign-in would sit
     // behind the poller's cached `None` (or a stale pre-logout pair) until
     // something else forced a re-read, leaving the app idle after the user
@@ -171,7 +193,7 @@ async fn begin_login(app: tauri::AppHandle, server_url: String) -> Result<String
     if let Some(dirty) = app.try_state::<AuthDirty>() {
         dirty.mark();
     }
-    Ok(device.user_code)
+    Ok(LoginResult { user_code: device.user_code, persisted })
 }
 
 fn main() {
