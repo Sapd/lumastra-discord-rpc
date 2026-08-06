@@ -19,6 +19,31 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.release_id }}
     steps:
+      - uses: actions/checkout@v4
+
+      # Tauri names its bundles from the app version in tauri.conf.json, NOT
+      # from the git tag. Tagging v0.1.1 without bumping that version produces
+      # a release full of artifacts labelled 0.1.0 — the build succeeds and the
+      # mislabelling is only visible by reading the asset names. Fail loudly
+      # instead.
+      - name: Tag must match the app version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          crate=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+          echo "tag=$tag  tauri.conf.json=$app  package.json=$pkg  Cargo.toml=$crate"
+          fail=0
+          for pair in "tauri.conf.json:$app" "package.json:$pkg" "Cargo.toml:$crate"; do
+            name="${pair%%:*}"; val="${pair#*:}"
+            if [ "$val" != "$tag" ]; then
+              echo "::error title=Version mismatch::$name is $val but the tag is v$tag. Bump it before tagging."
+              fail=1
+            fi
+          done
+          exit $fail
+
       - uses: actions/github-script@v7
         id: create
         with:
