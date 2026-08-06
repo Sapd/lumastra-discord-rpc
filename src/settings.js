@@ -76,17 +76,24 @@ document.getElementById('signin').addEventListener('click', async () => {
   try {
     // The device code returned here is already spent the moment approval
     // completes, so it's not shown — `applyAuthState` sets a plain "Signed
-    // in" (or the not-persisted warning below). It was still useful earlier,
-    // while approval was pending; that's the `device-code` listener above,
-    // which is untouched.
-    const { persisted } = await invoke('begin_login', { serverUrl: config.server_url });
+    // in" (or one of the notes below). It was still useful earlier, while
+    // approval was pending; that's the `device-code` listener above, which
+    // is untouched.
+    const { persist } = await invoke('begin_login', { serverUrl: config.server_url });
     applyAuthState(true);
-    if (!persisted) {
-      // `persisted: false` means `begin_login` wrote the login but couldn't
-      // read it back — on macOS that happens when the app isn't code-signed,
-      // because the keychain entry it just wrote isn't readable by this
-      // build. The sign-in worked for right now (it's cached in memory), so
-      // this doesn't block anything — it just won't survive a restart.
+    if (persist === 'fileFallback') {
+      // The keychain write didn't read back — on macOS that happens when
+      // the app isn't code-signed, because the entry it just wrote isn't
+      // readable by this build. `begin_login` already fell back to a
+      // protected file on disk, so the login *does* survive a restart —
+      // this is a working state, not an error, so keep it calm.
+      status.textContent =
+        "Signed in. This build isn't code-signed, so your login is saved to a protected " +
+        'file instead of the Keychain.';
+    } else if (persist === 'notPersisted') {
+      // Neither the keychain nor the file fallback could hold the tokens.
+      // The sign-in worked for right now (it's cached in memory), so this
+      // doesn't block anything — it just won't survive a restart.
       status.textContent =
         "Signed in, but this build can't save your login — you'll need to sign in again " +
         'after restarting the app, because it is not code-signed.';

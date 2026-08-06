@@ -36,17 +36,26 @@ OS), so each platform runs its own.
 ## Token storage
 
 Release builds store OAuth tokens in the OS keychain (macOS Keychain, Windows Credential
-Manager). **On macOS this only persists across launches if the app is signed with a stable
-identity.** The Keychain ACL is bound to the code signature, and an ad-hoc (unsigned)
-signature is derived from the binary's own hash — so an unsigned or ad-hoc-signed release
-build can write a token, report success, and still be unable to read it back on the next
-launch, or on the next run at all. That is why debug builds use a file store instead (see
-below), and it applies just as much to release builds until
-[signing is actually configured](#releases-and-signing) — an unsigned release quietly loses
-the login on every restart.
+Manager) by default. **On macOS this only persists across launches if the app is signed with
+a stable identity.** The Keychain ACL is bound to the code signature, and an ad-hoc
+(unsigned) signature is derived from the binary's own hash — so an unsigned or ad-hoc-signed
+release build can write a token, report success, and still be unable to read it back on the
+next launch, or on the next run at all — until
+[signing is actually configured](#releases-and-signing).
 
-Debug builds deliberately do **not** use the keychain. They use a `0600` file in the app
-config directory instead, because development binaries are ad-hoc signed — their code
+That unsigned case is not silent: `store()` immediately reads back what it just wrote, and if
+the read-back is missing or doesn't match, the release build **falls back to the same `0600`
+file the debug backend uses** (`dev-tokens.json` in the app config directory — the same
+platform-specific path described below), written atomically via temp-file + rename. The
+decision is remembered for the rest of the process (so it doesn't re-probe the keychain, and
+therefore doesn't risk repeatedly triggering an OS prompt), and from then on `load()` and
+`clear()` use the file store too, so the app never writes to one place and reads from
+another. `clear()` (sign-out) always clears **both** backends regardless of which is active,
+so a stale entry can't survive in either one. A signed build never trips this path — the
+keychain round-trips normally, so it never reaches the file store.
+
+Debug builds deliberately do **not** use the keychain at all. They always use the same `0600`
+file in the app config directory, because development binaries are ad-hoc signed — their code
 signature changes on every rebuild, so macOS can't maintain a stable keychain ACL and
 re-prompts on every launch.
 

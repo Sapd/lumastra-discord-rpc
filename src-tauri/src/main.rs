@@ -113,18 +113,35 @@ fn logout(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Outcome of a successful `begin_login`, returned to the settings UI.
+/// Where a successful `begin_login`'s tokens ended up, returned to the
+/// settings UI so it can explain what's actually going on rather than a
+/// flat yes/no — see the call site below.
 ///
-/// `persisted` is `false` when the read-back immediately after
-/// `tokens::store` didn't match what was stored — see the call site below.
-/// The sign-in itself still succeeded (the poller has the tokens in memory
-/// for this run), so this never turns into an error; the UI uses it to warn
-/// the user instead.
+/// - `Keychain`: stored in the OS keychain — the common case on a signed
+///   release build (and the only state debug builds never report, since
+///   they never touch the keychain at all). No message needed.
+/// - `FileFallback`: the keychain write didn't round-trip (the
+///   ad-hoc-signature symptom — see `auth::tokens`), so this run fell back
+///   to the same `0600` file the debug backend already uses. The login is
+///   still safely on disk; the UI should say so calmly, not raise an alarm.
+/// - `NotPersisted`: neither backend could hold the tokens (a real keychain
+///   error, or the fallback file write also failed). The sign-in itself
+///   still worked for this run — the poller has the tokens in memory — it
+///   just won't survive a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum PersistOutcome {
+    Keychain,
+    FileFallback,
+    NotPersisted,
+}
+
+/// Outcome of a successful `begin_login`, returned to the settings UI.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LoginResult {
     user_code: String,
-    persisted: bool,
+    persist: PersistOutcome,
 }
 
 /// Start the device flow: open the pre-filled verification URL in the user's
@@ -177,15 +194,22 @@ async fn begin_login(app: tauri::AppHandle, server_url: String) -> Result<LoginR
     .await
     .map_err(|e| e.to_string())?;
 
-    auth::tokens::store(&tokens).map_err(|e| e.to_string())?;
-    // `store()` reporting success is not proof the tokens will still be
-    // there on the next launch — on macOS the Keychain ACL is bound to the
-    // app's code signature, and an ad-hoc (unsigned) signature is derived
-    // from the binary's own hash, so a write can succeed but not survive a
-    // read-back. Checking immediately, rather than trusting the `Ok`, is
-    // what makes that condition visible instead of a silent "worked while
-    // the app happened to keep running."
-    let persisted = auth::tokens::verify_round_trip(&tokens, auth::tokens::load().as_ref());
+    // `tokens::store` itself tries the keychain first and falls back to the
+    // file backend when a round-trip proves the keychain entry it just
+    // wrote isn't actually readable back — on macOS that's what an ad-hoc
+    // (unsigned) code signature does, since the Keychain ACL is bound to
+    // the signature. Rather than trusting a bare `Ok` (which the old
+    // pre-fallback code did, silently losing the login), ask which backend
+    // actually ended up holding the tokens so the UI can say so.
+    let persist = match auth::tokens::store(&tokens) {
+        Ok(()) if auth::tokens::keychain_active() => PersistOutcome::Keychain,
+        Ok(()) => PersistOutcome::FileFallback,
+        // Neither backend could hold the tokens. The sign-in itself still
+        // worked for this run — the poller has the tokens in memory — so
+        // this doesn't fail the command, same as the file-fallback case;
+        // the UI just won't get to skip its restart warning.
+        Err(_) => PersistOutcome::NotPersisted,
+    };
     // Symmetric with `logout`: without this, a fresh sign-in would sit
     // behind the poller's cached `None` (or a stale pre-logout pair) until
     // something else forced a re-read, leaving the app idle after the user
@@ -193,7 +217,7 @@ async fn begin_login(app: tauri::AppHandle, server_url: String) -> Result<LoginR
     if let Some(dirty) = app.try_state::<AuthDirty>() {
         dirty.mark();
     }
-    Ok(LoginResult { user_code: device.user_code, persisted })
+    Ok(LoginResult { user_code: device.user_code, persist })
 }
 
 fn main() {

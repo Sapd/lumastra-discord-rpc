@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MIT
 //
-// Storage backend for OAuth tokens: OS keychain (release) vs. a file in the
-// app config dir (debug). See the `debug_backend` module below for why the
-// split exists and why it must never be collapsed.
+// Storage backend for OAuth tokens: OS keychain by default, falling back to
+// a file in the app config dir when the keychain can't be trusted — always
+// for debug builds (an ad-hoc signature that changes every rebuild), and for
+// an unsigned/ad-hoc-signed release build once a `store()` round-trip proves
+// the keychain entry it just wrote isn't actually readable back. See the
+// `file_backend` module below for the file format/location, and the comment
+// above it for why the split exists and must never be collapsed into
+// "release always uses the keychain."
 
 use serde::{Deserialize, Serialize};
 
@@ -43,16 +48,16 @@ pub enum AuthError {
     /// rather than propagating the panic into the poller.
     #[error("keychain task did not complete")]
     BlockingTaskFailed,
-    /// Debug backend only: the dev token file could not be read, written, or
+    /// File backend only: the token file could not be read, written, or
     /// removed (permissions, disk full, etc — anything other than "file
-    /// doesn't exist", which is not an error).
-    #[cfg(debug_assertions)]
-    #[error("dev token file io error: {0}")]
+    /// doesn't exist", which is not an error). Debug builds always go
+    /// through the file backend; release builds do too once the keychain
+    /// fallback has tripped (see `store`/`load`/`clear` below).
+    #[error("token file io error: {0}")]
     Io(#[from] std::io::Error),
-    /// Debug backend only: the platform's governing environment variable
-    /// (`HOME` on macOS/Linux, `APPDATA` on Windows) isn't set, so the dev
-    /// token file's location can't be resolved.
-    #[cfg(debug_assertions)]
+    /// File backend only: the platform's governing environment variable
+    /// (`HOME` on macOS/Linux, `APPDATA` on Windows) isn't set, so the token
+    /// file's location can't be resolved.
     #[error("could not resolve app config directory")]
     NoConfigDir,
 }
@@ -76,6 +81,12 @@ pub struct TokenResponse {
 /// from the read-back call itself, so it's testable without touching the
 /// real keychain — this crate deliberately has no keychain tests (the
 /// "Always Allow" prompt they'd risk triggering can hang).
+///
+/// Only called from the release-only `store()` below, so — like
+/// `KeychainAvailability` — this is gated on `any(not(debug_assertions),
+/// test)` rather than left uncompiled (and therefore untested by a plain
+/// `cargo test`) in debug builds.
+#[cfg(any(not(debug_assertions), test))]
 pub fn verify_round_trip(stored: &TokenResponse, loaded: Option<&TokenResponse>) -> bool {
     loaded == Some(stored)
 }
@@ -85,16 +96,19 @@ fn entry() -> Result<keyring::Entry, AuthError> {
     Ok(keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER)?)
 }
 
-/// Persist tokens to the OS keychain. Never write these to the config file.
+/// Write directly to the OS keychain, with no fallback logic of its own.
+/// Used by `store()` below as the first attempt on every release build.
 #[cfg(not(debug_assertions))]
-pub fn store(tokens: &TokenResponse) -> Result<(), AuthError> {
+fn keychain_store(tokens: &TokenResponse) -> Result<(), AuthError> {
     entry()?.set_password(&serde_json::to_string(tokens)?)?;
     Ok(())
 }
 
-/// Read tokens, or `None` when absent or unreadable.
+/// Read directly from the OS keychain, with no fallback logic of its own.
+/// Used both as `store()`'s round-trip check and as `load()`'s first
+/// attempt below.
 #[cfg(not(debug_assertions))]
-pub fn load() -> Option<TokenResponse> {
+fn keychain_load() -> Option<TokenResponse> {
     entry()
         .ok()?
         .get_password()
@@ -102,31 +116,154 @@ pub fn load() -> Option<TokenResponse> {
         .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
-/// Remove stored tokens. Absent entries are not an error — this runs on logout
-/// and on a rejected refresh, either of which may find nothing there.
+/// Remove directly from the OS keychain. Absent entries are not an error.
 #[cfg(not(debug_assertions))]
-pub fn clear() -> Result<(), AuthError> {
+fn keychain_clear() -> Result<(), AuthError> {
     match entry()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(error.into()),
     }
 }
 
+/// Whether the OS keychain has been found usable so far this process.
+///
+/// Starts `true` — assume it works, as on a properly signed release build —
+/// and flips to `false` the moment a `store()` round-trip fails (see
+/// `store()` below) or `load()` finds tokens only in the file backend (see
+/// `load()` below). Once flipped it stays flipped: the decision is made
+/// once and remembered for the process lifetime rather than re-probing the
+/// keychain on every call, since each probe is a real keychain access that
+/// can prompt on some configurations.
+///
+/// Defined without a `not(debug_assertions)` gate — even though it's only
+/// ever *used* by the release-only `store`/`load`/`clear` below — so its
+/// transition logic is reachable from a plain `cargo test` (which always
+/// builds with `debug_assertions` on, so `not(debug_assertions)` code never
+/// compiles there) without touching the real keychain.
+#[cfg(any(not(debug_assertions), test))]
+struct KeychainAvailability(std::sync::atomic::AtomicBool);
+
+#[cfg(any(not(debug_assertions), test))]
+impl KeychainAvailability {
+    const fn new() -> Self {
+        Self(std::sync::atomic::AtomicBool::new(true))
+    }
+
+    fn is_usable(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Idempotent — a second caller noticing the same unusable keychain
+    /// (e.g. `load()` after `store()` already tripped it) just leaves it
+    /// tripped.
+    fn mark_unusable(&self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+static KEYCHAIN_AVAILABLE: KeychainAvailability = KeychainAvailability::new();
+
+/// Whether the last `store()`/`load()` this process actually used the
+/// keychain, as opposed to the file fallback. Meaningless to call before
+/// either has run at least once; `main.rs` only calls this right after a
+/// successful `store()`, to decide which message (if any) to show the user.
+/// Debug builds never touch the keychain at all, so this is unconditionally
+/// `false` there.
+#[cfg(not(debug_assertions))]
+pub fn keychain_active() -> bool {
+    KEYCHAIN_AVAILABLE.is_usable()
+}
+
+#[cfg(debug_assertions)]
+pub fn keychain_active() -> bool {
+    false
+}
+
+/// Persist tokens: keychain first, falling back to the file store (see
+/// `file_backend` below) the moment a round-trip proves the keychain entry
+/// it just wrote isn't actually readable back — the ad-hoc-signature
+/// symptom. Never write these to the config file directly; `file_backend` is
+/// the only sanctioned path there, with its own permissions and atomic
+/// write.
+#[cfg(not(debug_assertions))]
+pub fn store(tokens: &TokenResponse) -> Result<(), AuthError> {
+    if !KEYCHAIN_AVAILABLE.is_usable() {
+        return file_backend::store(tokens);
+    }
+
+    keychain_store(tokens)?;
+
+    if verify_round_trip(tokens, keychain_load().as_ref()) {
+        return Ok(());
+    }
+
+    // The write reported success but didn't round-trip — exactly the
+    // ad-hoc-signature symptom. Fall back for the rest of the process, and
+    // persist *this* call's tokens to the file store too, so the login the
+    // user just completed isn't silently dropped.
+    KEYCHAIN_AVAILABLE.mark_unusable();
+    file_backend::store(tokens)
+}
+
+/// Read tokens, or `None` when absent or unreadable.
+///
+/// Tries the keychain first. If it's empty *and* the fallback hasn't
+/// already tripped this process, this also checks the file store: a value
+/// there with nothing in the keychain is evidence a previous run (or an
+/// earlier call this run) already fell back, so this adopts that finding for
+/// the rest of the process — otherwise a token that `store()` correctly
+/// fell back to disk for would never be found again on the next launch, and
+/// the whole point of the fallback would be defeated. This can't distinguish
+/// a truly empty install from one where the keychain holds a *stale* entry
+/// (see `verify_round_trip`'s doc comment) — a stale-but-present keychain
+/// value is returned as-is, same as before this fallback existed.
+#[cfg(not(debug_assertions))]
+pub fn load() -> Option<TokenResponse> {
+    if !KEYCHAIN_AVAILABLE.is_usable() {
+        return file_backend::load();
+    }
+
+    if let Some(tokens) = keychain_load() {
+        return Some(tokens);
+    }
+
+    let from_file = file_backend::load();
+    if from_file.is_some() {
+        KEYCHAIN_AVAILABLE.mark_unusable();
+    }
+    from_file
+}
+
+/// Remove stored tokens from *both* backends. Absent entries are not an
+/// error — this runs on logout and on a rejected refresh, either of which
+/// may find nothing there. Both backends are always attempted regardless of
+/// which one is currently active, so a stale entry left in the other (e.g.
+/// from before the fallback tripped, or from a previously signed build)
+/// can never survive a sign-out.
+#[cfg(not(debug_assertions))]
+pub fn clear() -> Result<(), AuthError> {
+    let keychain_result = keychain_clear();
+    let file_result = file_backend::clear();
+    keychain_result.and(file_result)
+}
+
 /// Debug-build stand-ins for `store`/`load`/`clear`, backed by
-/// `debug_backend` instead of the OS keychain. See that module for why.
+/// `file_backend` instead of the OS keychain. See that module, and the
+/// comment above it, for why.
 #[cfg(debug_assertions)]
 pub fn store(tokens: &TokenResponse) -> Result<(), AuthError> {
-    debug_backend::store(tokens)
+    file_backend::store(tokens)
 }
 
 #[cfg(debug_assertions)]
 pub fn load() -> Option<TokenResponse> {
-    debug_backend::load()
+    file_backend::load()
 }
 
 #[cfg(debug_assertions)]
 pub fn clear() -> Result<(), AuthError> {
-    debug_backend::clear()
+    file_backend::clear()
 }
 
 // Debug builds are ad-hoc signed on macOS (`Signature=adhoc, linker-signed`),
@@ -134,15 +271,22 @@ pub fn clear() -> Result<(), AuthError> {
 // Keychain "Always Allow" grant to the app's code signature, so every
 // `cargo build` produces what the OS considers a *different application* —
 // the saved grant never matches, and the user is re-prompted on every
-// launch (and that prompt has hung before, needing a kill). Release builds
-// are properly signed with a stable identity across rebuilds, so they keep
-// using the Keychain exactly as before, unmodified.
+// launch (and that prompt has hung before, needing a kill). That's why debug
+// builds use this file backend unconditionally, never the keychain.
 //
-// Do not "simplify" this by pointing release at this module too — doing so
-// puts long-lived OAuth tokens in a plaintext file instead of the Keychain
-// for real users.
-#[cfg(debug_assertions)]
-mod debug_backend {
+// A properly *signed* release build has a stable identity across rebuilds,
+// so it keeps using the Keychain as the default, exactly as before. An
+// *unsigned* (or ad-hoc-signed) release build — no Apple signing secrets
+// configured, see BUILDING.md — hits the exact same ad-hoc-signature problem
+// as a debug build, just discovered later: `store()` reports success but
+// the entry it wrote isn't readable back. In that case `store`/`load`/
+// `clear` above fall back to this same module for the rest of the process,
+// rather than silently losing the login.
+//
+// Do not "simplify" this by pointing a *signed* release build at this module
+// too — doing so puts long-lived OAuth tokens in a plaintext file instead of
+// the Keychain for real users who don't need the fallback.
+mod file_backend {
     use super::{AuthError, TokenResponse};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -542,5 +686,36 @@ mod verify_round_trip_tests {
             ..sample()
         };
         assert!(!verify_round_trip(&stored, Some(&stale)));
+    }
+}
+
+/// Pure tests for the fallback-decision state machine used by the release
+/// `store`/`load`/`clear` above. Each test builds its own local
+/// `KeychainAvailability` rather than touching the shared `KEYCHAIN_AVAILABLE`
+/// static, so they can't interfere with each other under the parallel test
+/// runner — and none of them touch the real keychain or disk.
+#[cfg(test)]
+mod keychain_availability_tests {
+    use super::*;
+
+    #[test]
+    fn starts_usable() {
+        let flag = KeychainAvailability::new();
+        assert!(flag.is_usable());
+    }
+
+    #[test]
+    fn tripping_it_makes_it_unusable() {
+        let flag = KeychainAvailability::new();
+        flag.mark_unusable();
+        assert!(!flag.is_usable());
+    }
+
+    #[test]
+    fn tripping_it_twice_is_idempotent() {
+        let flag = KeychainAvailability::new();
+        flag.mark_unusable();
+        flag.mark_unusable();
+        assert!(!flag.is_usable());
     }
 }
